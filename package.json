@@ -1,0 +1,23 @@
+{
+  "name": "fit-analyzer",
+  "version": "1.0.0",
+  "description": "Analyze .fit files from Garmin and other devices",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build && gh-pages -d dist"
+  },
+  "dependencies": {
+    "@garmin/fitsdk": "^21.195.0",
+    "chart.js": "^4.4.1",
+    "chartjs-plugin-zoom": "^2.2.0",
+    "fit-file-parser": "^2.3.3",
+    "leaflet": "^1.9.4"
+  },
+  "devDependencies": {
+    "gh-pages": "^6.3.0",
+    "vite": "^5.4.2"
+  }
+}

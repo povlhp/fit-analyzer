@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FIT File Analyzer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    h1 {
+      color: #00d9ff;
+    }
+    .upload-area {
+      border: 3px dashed #00d9ff;
+      border-radius: 12px;
+      padding: 3rem;
+      text-align: center;
+      margin-bottom: 2rem;
+      transition: all 0.3s;
+      cursor: pointer;
+    }
+    .upload-area:hover, .upload-area.dragover {
+      background: rgba(0, 217, 255, 0.1);
+      border-color: #00ff88;
+    }
+    .upload-area input {
+      display: none;
+    }
+    .file-list {
+      margin: 1rem 0;
+    }
+    .file-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #16213e;
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      margin-bottom: 0.5rem;
+    }
+    .file-item .name {
+      flex: 1;
+    }
+    .file-item .remove {
+      background: #e74c3c;
+      border: none;
+      color: white;
+      padding: 0.25rem 0.75rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .stat-card {
+      background: #16213e;
+      padding: 1.5rem;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .stat-card .label {
+      color: #888;
+      font-size: 0.85rem;
+      margin-bottom: 0.5rem;
+    }
+    .stat-card .value {
+      font-size: 1.5rem;
+      font-weight: bold;
+      color: #00d9ff;
+    }
+    .charts-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+      gap: 1.5rem;
+    }
+    .chart-wrapper {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 1rem;
+    }
+    .chart-wrapper h3 {
+      margin-bottom: 1rem;
+      color: #00ff88;
+    }
+    .chart-controls {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+    .smoothing-control {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .smoothing-control label {
+      color: #888;
+      font-size: 0.85rem;
+    }
+    .smoothing-control select {
+      background: #0f3460;
+      color: #fff;
+      border: 1px solid #00d9ff;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+    }
+    .reset-zoom {
+      background: #0f3460;
+      color: #00d9ff;
+      border: 1px solid #00d9ff;
+      padding: 0.25rem 0.75rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .reset-zoom:hover {
+      background: #00d9ff;
+      color: #1a1a2e;
+    }
+    .chart-reset-zoom:hover {
+      background: #00d9ff;
+      color: #1a1a2e;
+    }
+    .no-data {
+      text-align: center;
+      color: #666;
+      padding: 3rem;
+    }
+    .error {
+      background: #e74c3c;
+      color: white;
+      padding: 1rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+    }
+    body.light-mode {
+      background: #f5f5f5;
+      color: #333;
+    }
+    body.light-mode .upload-area {
+      border-color: #2196F3;
+    }
+    body.light-mode .upload-area:hover {
+      background: rgba(33, 150, 243, 0.1);
+    }
+    body.light-mode .file-item,
+    body.light-mode .stat-card,
+    body.light-mode .chart-wrapper,
+    body.light-mode #themeToggle {
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    body.light-mode .stat-card .value,
+    body.light-mode h1,
+    body.light-mode #themeToggle {
+      color: #2196F3;
+    }
+    body.light-mode .stat-card .label,
+    body.light-mode .smoothing-control label,
+    body.light-mode .chart-wrapper h3 {
+      color: #666;
+    }
+    body.light-mode .reset-zoom {
+      background: #fff;
+      color: #2196F3;
+      border-color: #2196F3;
+    }
+    body.light-mode .reset-zoom:hover {
+      background: #2196F3;
+      color: #fff;
+    }
+    body.light-mode .smoothing-control select,
+    body.light-mode #themeToggle {
+      background: #fff;
+      border-color: #2196F3;
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+      <h1 style="margin: 0;">FIT File Analyzer</h1>
+      <button id="themeToggle" style="background: #16213e; color: #00d9ff; border: 1px solid #00d9ff; padding: 0.5rem 1rem; border-radius: 8px; cursor: pointer;">🌙</button>
+    </div>
+    
+    <div class="upload-area" id="uploadArea">
+      <input type="file" id="fileInput" accept=".fit" multiple>
+      <p>Drop .FIT files here or click to browse</p>
+      <div class="file-list" id="fileList"></div>
+    </div>
+
+    <div id="errorContainer"></div>
+    <div id="statsContainer"></div>
+    <div id="mapContainer" style="display: none; margin-bottom: 1.5rem;">
+      <div class="chart-wrapper" style="padding: 0.5rem;">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.5rem 0.5rem 0.5rem;">
+          <h3 style="margin: 0; color: #00ff88;">Map</h3>
+        </div>
+        <div id="map" style="height: 400px; border-radius: 8px;"></div>
+      </div>
+    </div>
+    <div id="chartsContainer" class="charts-container"></div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
