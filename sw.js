@@ -1,4 +1,4 @@
-const CACHE_NAME = 'fit-analyzer-v1';
+const CACHE_NAME = 'fit-analyzer-v2';
 const ASSETS = [
   '/fit-analyzer/',
   '/fit-analyzer/index.html',
