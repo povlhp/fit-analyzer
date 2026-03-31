@@ -24,11 +24,11 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         <input type="checkbox" id="toggle-map-${m}" checked onchange="toggleSection('${m}', 'map', this.checked)">
         <span>Map</span>
       </label>
-      <select class="global-smoothing" data-tab="${m}" style="padding: 0.25rem; border-radius: 4px; background: #16213e; color: #00d9ff; border: 1px solid #333;">
+      <select class="global-smoothing" data-tab="${m}" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: #0f3460; color: #00d9ff; border: 1px solid #00d9ff; font-size: 0.875rem; cursor: pointer;">
         <option value="0" ${ve===0?"selected":""}>Raw</option>
-        <option value="3" ${ve===3?"selected":""}>3s</option>
-        <option value="10" ${ve===10?"selected":""}>10s</option>
-        <option value="30" ${ve===30?"selected":""}>30s</option>
+        <option value="3" ${ve===3?"selected":""}>3s avg</option>
+        <option value="10" ${ve===10?"selected":""}>10s avg</option>
+        <option value="30" ${ve===30?"selected":""}>30s avg</option>
       </select>
     </div>
     <div id="statsContainer-${m}">${r}</div>
