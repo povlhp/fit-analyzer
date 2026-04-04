@@ -462,7 +462,7 @@ function createChartConfig(datasets, options = {}) {
     options: {
       responsive: true,
       maintainAspectRatio: true,
-      aspectRatio: isScatter ? 1 : 1.25,
+      aspectRatio: isScatter ? 0.667 : 0.833,
       animation: false,
       interaction: {
         intersect: false,
