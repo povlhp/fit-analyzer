@@ -1,4 +1,4 @@
-const CACHE_NAME = 'fit-analyzer-v2';
+const CACHE_NAME = 'fit-analyzer-v3';
 const ASSETS = [
   '/fit-analyzer/',
   '/fit-analyzer/index.html',
@@ -22,7 +22,11 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  event.respondWith(
-    caches.match(event.request).then((response) => response || fetch(event.request))
-  );
+  if (event.request.url.includes('/index.html')) {
+    event.respondWith(fetch(event.request));
+  } else {
+    event.respondWith(
+      caches.match(event.request).then((response) => response || fetch(event.request))
+    );
+  }
 });
