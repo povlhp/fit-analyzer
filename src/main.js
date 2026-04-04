@@ -1,6 +1,9 @@
 import FitParser from 'fit-file-parser';
 import { Chart, registerables } from 'chart.js';
 import zoomPlugin from 'chartjs-plugin-zoom';
+import JSZip from 'jszip';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 
 Chart.register(...registerables, zoomPlugin);
 
@@ -25,7 +28,14 @@ function initTheme() {
 
 initTheme();
 
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/fit-analyzer/sw.js');
+}
+
+const fileTabs = {};
+let activeTabId = null;
 let fitData = null;
+let tabCounter = 0;
 const charts = {};
 
 function showError(msg) {
@@ -63,7 +73,7 @@ async function parseFitFile(file) {
       if (error) {
         reject(error);
       } else {
-        console.log('Parsed FIT data structure:', JSON.stringify(data, null, 2).substring(0, 3000));
+
         resolve(data);
       }
     });
@@ -73,21 +83,14 @@ async function parseFitFile(file) {
 function extractRecordData(data) {
   let records = [];
   
-  console.log('Looking for records in:', Object.keys(data));
-  
   if (data.records && data.records.length > 0) {
-    console.log('Found records at top level');
     records = data.records;
   } else if (data.activity) {
-    console.log('Looking in activity.sessions');
     if (data.activity.sessions) {
       for (const session of data.activity.sessions) {
-        console.log('Session keys:', Object.keys(session));
         if (session.laps) {
           for (const lap of session.laps) {
-            console.log('Lap keys:', Object.keys(lap));
             if (lap.records) {
-              console.log('Found', lap.records.length, 'records in lap');
               records = records.concat(lap.records);
             }
           }
@@ -112,8 +115,6 @@ function extractRecordData(data) {
     }
   }
   
-  console.log('Total extracted records:', records.length);
-  
   const result = {
     timestamps: [],
     speed: [],
@@ -130,12 +131,14 @@ function extractRecordData(data) {
     rightTorqueEffectiveness: [],
     leftPedalSmoothness: [],
     rightPedalSmoothness: [],
+    strideLength: [],
+    groundContactTime: [],
+    flightTime: [],
+    verticalRatio: [],
+    verticalOscillation: [],
     gpsLat: [],
     gpsLong: []
   };
-
-  console.log('Sample record keys:', Object.keys(records[0] || {}));
-  console.log('Sample record:', records[0]);
 
   for (const record of records) {
     if (record.timestamp) {
@@ -158,6 +161,11 @@ function extractRecordData(data) {
     result.rightTorqueEffectiveness.push(record.right_torque_effectiveness ?? record.rightTorqueEffectiveness ?? null);
     result.leftPedalSmoothness.push(record.left_pedal_smoothness ?? record.leftPedalSmoothness ?? null);
     result.rightPedalSmoothness.push(record.right_pedal_smoothness ?? record.rightPedalSmoothness ?? null);
+    result.strideLength.push(record.stride_length ?? record.strideLength ?? null);
+    result.groundContactTime.push(record.ground_contact_time ?? record.groundContactTime ?? null);
+    result.flightTime.push(record.flight_time ?? record.flightTime ?? null);
+    result.verticalRatio.push(record.vertical_ratio ?? record.verticalRatio ?? null);
+    result.verticalOscillation.push(record.vertical_oscillation ?? record.verticalOscillation ?? null);
     
     const lat = record.position_lat ?? record.gps_lat ?? record.latitude;
     const lon = record.position_long ?? record.gps_long ?? record.longitude;
@@ -196,9 +204,6 @@ function extractRecordData(data) {
     }
   }
 
-  console.log('Extracted data points:', result.timestamps.length);
-  console.log('Sample record:', records[0]);
-  
   return result;
 }
 
@@ -311,9 +316,11 @@ function resetAllZooms() {
   });
 }
 
-function renderStats(stats, session) {
-  const container = document.getElementById('statsContainer');
-  
+function renderStats(stats) {
+  return renderStatsHtml(stats);
+}
+
+function renderStatsHtml(stats) {
   let html = '<div class="stats-grid">';
   
   if (stats.duration) {
@@ -366,16 +373,16 @@ function renderStats(stats, session) {
   }
   
   html += '</div>';
-  container.innerHTML = html;
+  return html;
 }
 
 function createChartConfig(datasets, options = {}) {
   const textColor = isDarkMode ? '#888' : '#666';
-  const gridColor = isDarkMode ? '#333' : '#ddd';
+  const gridColor = isDarkMode ? '#333' : '#cccccc';
   const { yMin, yMax, isScatter } = options;
-
+  
   let chartDatasets, chartType, chartData, interactionMode, xTicks;
-
+  
   if (isScatter) {
     chartType = 'scatter';
     chartDatasets = datasets.map(ds => ({
@@ -388,20 +395,43 @@ function createChartConfig(datasets, options = {}) {
     }));
     chartData = { datasets: chartDatasets };
     interactionMode = 'nearest';
-    xTicks = { color: textColor, autoSkip: true, maxTicksLimit: 10 };
-  } else {
-    chartType = 'line';
+    xTicks = { color: textColor, maxTicksLimit: 10 };
+  } else if (datasets.some(ds => ds.label?.includes('Smoothness'))) {
+    chartType = 'scatter';
     chartDatasets = datasets.map(ds => ({
       label: ds.label,
       data: ds.data,
+      backgroundColor: ds.color + '60',
       borderColor: ds.color,
-      backgroundColor: ds.color + (isDarkMode ? '20' : '30'),
-      borderWidth: ds.label.includes('Avg') ? 1 : 1.5,
-      pointRadius: 0,
-      tension: 0.1,
-      fill: false,
-      yAxisID: ds.yAxis === 'y2' ? 'y2' : 'y'
+      pointRadius: 2,
+      pointHoverRadius: 4
     }));
+    chartData = { labels: labels.filter((_, i) => datasets[0]?.data[i]?.x !== undefined), datasets: chartDatasets };
+    interactionMode = 'nearest';
+    xTicks = { color: textColor, maxTicksLimit: 10 };
+  } else {
+    chartType = 'line';
+    chartDatasets = datasets.map(ds => {
+      const isAvg = ds.label.includes('Avg');
+      let group = null;
+      if (ds.label.includes('Speed')) group = 'speed';
+      else if (ds.label.includes('Cadence')) group = 'cadence';
+      else if (ds.label.includes('HR')) group = 'heartRate';
+      else if (ds.label.includes('Power')) group = ds.label.includes('L Power') ? 'leftPower' : ds.label.includes('R Power') ? 'rightPower' : 'power';
+      else if (ds.label.includes('Smooth')) group = ds.label.includes('L') ? 'leftPedalSmooth' : 'rightPedalSmooth';
+      return {
+        label: ds.label,
+        data: ds.data,
+        borderColor: ds.color,
+        backgroundColor: ds.color + (isDarkMode ? '20' : '30'),
+        borderWidth: isAvg ? 1 : 1.5,
+        pointRadius: 0,
+        tension: 0.1,
+        fill: false,
+        yAxisID: ds.yAxis === 'y2' ? 'y2' : 'y',
+        _group: group
+      };
+    });
     chartData = { labels, datasets: chartDatasets };
     interactionMode = 'index';
     xTicks = { color: textColor, maxTicksLimit: 10 };
@@ -411,32 +441,28 @@ function createChartConfig(datasets, options = {}) {
     display: true,
     position: 'left',
     ticks: { color: textColor },
-    grid: { color: gridColor }
+    grid: { color: gridColor, borderColor: gridColor },
+    title: { display: true, color: textColor }
   };
   
   const y2Scale = {
     display: datasets.some(ds => ds.yAxis === 'y2'),
     position: 'right',
     ticks: { color: '#f97316' },
-    grid: { drawOnChartArea: false }
+    grid: { drawOnChartArea: false },
+    title: { display: true, color: textColor }
   };
-  
+
   if (yMin !== undefined) yScale.min = yMin;
   if (yMax !== undefined) yScale.max = yMax;
-  if (yMin !== undefined && yMax !== undefined) {
-    yScale.afterDataLimits = (scale) => {
-      if (scale.min < yMin) scale.min = yMin;
-      if (scale.max > yMax) scale.max = yMax;
-    };
-  }
 
-  return {
+  const config = {
     type: chartType,
     data: chartData,
     options: {
       responsive: true,
       maintainAspectRatio: true,
-      aspectRatio: isScatter ? 2 : 2.5,
+      aspectRatio: isScatter ? 1 : 1.25,
       animation: false,
       interaction: {
         intersect: false,
@@ -444,13 +470,19 @@ function createChartConfig(datasets, options = {}) {
       },
       plugins: {
         legend: { 
-          display: datasets.length > 1,
-          labels: { color: textColor },
+          display: datasets.filter(ds => !ds.label.includes('Avg')).length > 1,
+          labels: { color: textColor, filter: item => !item.text.includes('Avg') },
           onClick: (e, legendItem, legend) => {
             const index = legendItem.datasetIndex;
             const ci = legend.chart;
-            const meta = ci.getDatasetMeta(index);
-            meta.hidden = meta.hidden === null ? !ci.data.datasets[index].hidden : null;
+            const clickedDataset = ci.data.datasets[index];
+            const group = clickedDataset._group;
+            const newHidden = ci.getDatasetMeta(index).hidden === null ? !clickedDataset.hidden : null;
+            ci.data.datasets.forEach((ds, i) => {
+              if (ds._group === group) {
+                ci.getDatasetMeta(i).hidden = newHidden;
+              }
+            });
             ci.update();
           }
         },
@@ -469,12 +501,12 @@ function createChartConfig(datasets, options = {}) {
         },
         tooltip: {
           mode: 'index',
-          intersect: false
+          intersect: false,
+          filter: tooltipItem => !tooltipItem.dataset.label.includes('Avg ')
         }
       },
-      onClick: (e, elements) => {
-        const chart = Chart.getChart(e.chart.canvas);
-        if (chart) {
+      onClick: (e, elements, chart) => {
+        if (elements.length === 0) {
           chart.options.plugins.tooltip.enabled = false;
           chart.update('none');
           setTimeout(() => {
@@ -483,28 +515,22 @@ function createChartConfig(datasets, options = {}) {
         }
       },
       onHover: (e, elements, chart) => {
-        if (elements.length === 0) {
-          chart.canvas.style.cursor = 'default';
-        } else {
-          chart.canvas.style.cursor = 'crosshair';
-        }
+        chart.canvas.style.cursor = elements.length === 0 ? 'default' : 'crosshair';
       },
       scales: {
         x: {
           display: true,
-          ticks: xTicks,
-          grid: { color: gridColor },
-          title: {
-            display: true,
-            text: isScatter ? 'Power (W)' : '',
-            color: textColor
-          }
+          ticks: { ...xTicks, color: textColor },
+          grid: { color: gridColor, borderColor: gridColor },
+          title: { display: true, text: isScatter ? 'Power (W)' : '', color: textColor }
         },
         y: { ...yScale, title: { display: true, text: isScatter ? 'L Balance / Smoothness (%)' : '', color: textColor } },
         ...(y2Scale.display ? { y2: y2Scale } : {})
       }
     }
   };
+  
+  return config;
 }
 
 let syncTimeout = null;
@@ -527,160 +553,405 @@ function syncChartsZoom(sourceChart) {
   }, 10);
 }
 
-function renderCharts(data) {
-  const container = document.getElementById('chartsContainer');
-  container.innerHTML = '';
+async function processFiles(files) {
+  clearError();
   
-  labels = fitData.timestamps.map(t => {
+  if (files.length === 0) return;
+  
+  for (const file of files) {
+    const tabId = 'tab-' + (++tabCounter);
+    
+    try {
+      const fitDataParsed = await parseFitFile(file);
+      const fitData = extractRecordData(fitDataParsed);
+      const sessionData = extractSessionData(fitDataParsed, fitData);
+      const stats = calculateStats(fitData, sessionData);
+      
+      fileTabs[tabId] = { name: file.name, fitData, stats };
+      window.fitData = fitData;
+      
+      createTab(tabId, file.name);
+      renderTabContent(tabId, fitData, stats);
+      switchToTab(tabId);
+      
+    } catch (err) {
+      showError(`Error parsing ${file.name}: ${err.message}`);
+      console.error(err);
+    }
+  }
+}
+
+function createTab(tabId, fileName) {
+  const tabsContainer = document.getElementById('tabsContainer');
+  const tabsList = document.getElementById('tabsList');
+  
+  tabsContainer.style.display = 'block';
+  
+  const tab = document.createElement('div');
+  tab.className = 'tab';
+  tab.dataset.tabId = tabId;
+  tab.innerHTML = `<span>${fileName}</span><span class="tab-close" data-close="${tabId}">×</span>`;
+  tab.onclick = (e) => {
+    if (!e.target.classList.contains('tab-close')) {
+      switchToTab(tabId);
+    }
+  };
+  tabsList.appendChild(tab);
+  
+  const closeBtn = tab.querySelector('.tab-close');
+  closeBtn.onclick = (e) => {
+    e.stopPropagation();
+    closeTab(tabId);
+  };
+  
+  const tabContent = document.createElement('div');
+  tabContent.id = tabId;
+  tabContent.className = 'tab-content';
+  document.getElementById('tabContents').appendChild(tabContent);
+}
+
+function switchToTab(tabId) {
+  activeTabId = tabId;
+  
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.tab[data-tab-id="${tabId}"]`)?.classList.add('active');
+  
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById(tabId)?.classList.add('active');
+  
+  const tabData = fileTabs[tabId];
+  if (tabData && tabData.fitData) {
+    setTimeout(() => {
+      renderMapForTab(tabId, tabData.fitData);
+    }, 10);
+  }
+}
+
+let touchStartX = 0;
+let touchStartY = 0;
+let touchEndX = 0;
+let touchEndY = 0;
+let touchStartElement = null;
+
+document.addEventListener('touchstart', (e) => {
+  touchStartX = e.changedTouches[0].screenX;
+  touchStartY = e.changedTouches[0].screenY;
+  touchStartElement = e.target;
+}, { passive: true });
+
+document.addEventListener('touchend', (e) => {
+  touchEndX = e.changedTouches[0].screenX;
+  touchEndY = e.changedTouches[0].screenY;
+  if (touchStartElement) {
+    const el = touchStartElement;
+    if (el.classList?.contains('leaflet-container') || el.classList?.contains('leaflet-tile') || 
+        el.closest('.leaflet-container') || el.closest('canvas') || el.closest('.chart-wrapper')) {
+      return;
+    }
+  }
+  handleSwipe();
+}, { passive: true });
+
+function handleSwipe() {
+  const swipeThreshold = 50;
+  const diffX = touchStartX - touchEndX;
+  const diffY = Math.abs(touchStartY - touchEndY);
+  
+  if (typeof diffX !== 'number' || typeof diffY !== 'number') return;
+  if (Math.abs(diffX) < swipeThreshold) return;
+  if (diffY > 30) return;
+  
+  const tabs = Object.keys(fileTabs);
+  if (tabs.length < 2) return;
+  
+  const currentIndex = tabs.indexOf(activeTabId);
+  
+  if (diffX > 0) {
+    const nextIndex = Math.min(currentIndex + 1, tabs.length - 1);
+    if (nextIndex !== currentIndex) {
+      switchToTab(tabs[nextIndex]);
+    }
+  } else {
+    const prevIndex = Math.max(currentIndex - 1, 0);
+    if (prevIndex !== currentIndex) {
+      switchToTab(tabs[prevIndex]);
+    }
+  }
+}
+
+function closeTab(tabId) {
+  const tab = document.querySelector(`.tab[data-tab-id="${tabId}"]`);
+  const content = document.getElementById(tabId);
+  
+  if (tab) tab.remove();
+  if (content) content.remove();
+  
+  delete fileTabs[tabId];
+  
+  if (activeTabId === tabId) {
+    const remaining = Object.keys(fileTabs);
+    if (remaining.length > 0) {
+      switchToTab(remaining[remaining.length - 1]);
+    } else {
+      activeTabId = null;
+      document.getElementById('tabsContainer').style.display = 'none';
+    }
+  }
+}
+
+function renderTabContent(tabId, fitData, stats) {
+  const container = document.getElementById(tabId);
+  
+  const statsHtml = renderStatsHtml(stats);
+  container.innerHTML = `
+    <div class="tab-header-bar" style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; padding: 0.5rem; background: #0f3460; border-radius: 8px;">
+      <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #00d9ff;">
+        <input type="checkbox" id="toggle-stats-${tabId}" checked onchange="toggleSection('${tabId}', 'stats', this.checked)">
+        <span>Stats</span>
+      </label>
+      <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #00d9ff;">
+        <input type="checkbox" id="toggle-map-${tabId}" checked onchange="toggleSection('${tabId}', 'map', this.checked)">
+        <span>Map</span>
+      </label>
+      <span style="color: #00d9ff;">Smoothing:</span>
+      <select class="global-smoothing" data-tab="${tabId}" style="padding: 0.25rem 0.5rem; border-radius: 4px; background: #0f3460; color: #00d9ff; border: 1px solid #00d9ff; font-size: 0.875rem; cursor: pointer;">
+        <option value="0" ${currentSmoothing === 0 ? 'selected' : ''}>Raw</option>
+        <option value="3" ${currentSmoothing === 3 ? 'selected' : ''}>3s avg</option>
+        <option value="10" ${currentSmoothing === 10 ? 'selected' : ''}>10s avg</option>
+        <option value="30" ${currentSmoothing === 30 ? 'selected' : ''}>30s avg</option>
+      </select>
+    </div>
+    <div id="statsContainer-${tabId}">${statsHtml}</div>
+    <div id="mapContainer-${tabId}" style="margin-bottom: 1.5rem;">
+      <div class="chart-wrapper" style="padding: 0.5rem;">
+        <div id="map-${tabId}" style="height: 400px; border-radius: 8px;"></div>
+      </div>
+    </div>
+    <div id="chartsContainer-${tabId}" class="charts-container"></div>
+  `;
+  
+  renderMapForTab(tabId, fitData);
+  renderChartsForTab(tabId, fitData);
+  
+  document.querySelector(`.global-smoothing[data-tab="${tabId}"]`)?.addEventListener('change', (e) => {
+    currentSmoothing = parseInt(e.target.value);
+    renderChartsForTab(tabId, fitData);
+  });
+  
+  window.toggleSection = (tabId, section, visible) => {
+    if (section === 'stats') {
+      document.getElementById(`statsContainer-${tabId}`).style.display = visible ? 'block' : 'none';
+    } else if (section === 'map') {
+      document.getElementById(`mapContainer-${tabId}`).style.display = visible ? 'block' : 'none';
+    }
+  };
+}
+
+function renderMapForTab(tabId, data) {
+  const mapContainer = document.getElementById(`mapContainer-${tabId}`);
+  const mapElement = document.getElementById(`map-${tabId}`);
+  
+  if (!mapElement) return;
+  
+  const validCoords = [];
+  for (let i = 0; i < data.gpsLat.length; i++) {
+    if (data.gpsLat[i] !== null && data.gpsLong[i] !== null) {
+      const lat = data.gpsLat[i];
+      const lon = data.gpsLong[i];
+      if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 && Math.abs(lat) > 0.001 && Math.abs(lon) > 0.001) {
+        validCoords.push([lat, lon]);
+      }
+    }
+  }
+  
+  if (validCoords.length < 10) {
+    mapContainer.style.display = 'none';
+    return;
+  }
+
+  mapContainer.style.display = 'block';
+  
+  if (window.mapInstance) {
+    window.mapInstance.remove();
+    window.mapInstance = null;
+  }
+  
+  const newMapElement = mapElement.cloneNode(false);
+  mapElement.parentNode.replaceChild(newMapElement, mapElement);
+  
+  const renderKey = Date.now() + '-' + Math.random();
+  newMapElement.dataset.renderKey = renderKey;
+  
+  setTimeout(() => {
+    if (newMapElement.dataset.renderKey !== renderKey) return;
+    
+    const map = L.map(newMapElement, { zoomControl: true });
+    window.mapInstance = map;
+    
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+    
+    const polyline = L.polyline(validCoords, { color: '#ff8c00', weight: 4 }).addTo(map);
+    
+    const startIcon = L.divIcon({
+      className: 'marker-start',
+      html: '<div style="background:#22c55e;width:16px;height:16px;border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;">▶</div>',
+      iconSize: [16, 16],
+      iconAnchor: [8, 8]
+    });
+    L.marker(validCoords[0], { icon: startIcon }).addTo(map).bindPopup('Start');
+    
+    const finishIcon = L.divIcon({
+      className: 'marker-finish',
+      html: '<div style="background:#333;width:16px;height:16px;border-radius:2px;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;">🏁</div>',
+      iconSize: [16, 16],
+      iconAnchor: [8, 8]
+    });
+    L.marker(validCoords[validCoords.length - 1], { icon: finishIcon }).addTo(map).bindPopup('Finish');
+    
+    let totalDist = 0;
+    const kmMarkers = [];
+    for (let i = 1; i < validCoords.length; i++) {
+      const d = map.distance(validCoords[i - 1], validCoords[i]) / 1000;
+      totalDist += d;
+      const km = Math.round(totalDist);
+      const prevKm = kmMarkers.length > 0 ? kmMarkers[kmMarkers.length - 1].km : 0;
+      if (km > prevKm) {
+        let interval = 1;
+        if (totalDist > 20) interval = 5;
+        if (totalDist > 50) interval = 10;
+        if (km % interval === 0) {
+          kmMarkers.push({ km, coords: validCoords[i] });
+        }
+      }
+    }
+    
+    kmMarkers.forEach(m => {
+      const markerIcon = L.divIcon({
+        className: 'km-marker',
+        html: `<div style="background:#ff8c00;color:#fff;font-size:10px;font-weight:bold;padding:2px 4px;border-radius:4px;border:1px solid #fff;">${m.km}km</div>`,
+        iconSize: [30, 16],
+        iconAnchor: [15, 8]
+      });
+      L.marker(m.coords, { icon: markerIcon }).addTo(map);
+    });
+    
+    map.fitBounds(polyline.getBounds(), { padding: [20, 20] });
+  }, 50);
+}
+
+function renderChartsForTab(tabId, data) {
+  const container = document.getElementById(`chartsContainer-${tabId}`);
+  if (!container) {
+    return;
+  }
+  Object.keys(charts).forEach(k => {
+    if (k.startsWith(tabId)) {
+      charts[k].destroy();
+      delete charts[k];
+    }
+  });
+  
+  labels = data.timestamps.map(t => {
     if (!(t instanceof Date) || isNaN(t)) return '';
-    const elapsed = (t - fitData.timestamps[0]) / 1000;
+    const elapsed = (t - data.timestamps[0]) / 1000;
     return formatDuration(elapsed);
   });
   
-  const smoothedPower = applySmoothing(data.power, currentSmoothing);
-  const smoothedLeftPower = applySmoothing(data.leftPower, currentSmoothing);
-  const smoothedRightPower = applySmoothing(data.rightPower, currentSmoothing);
-  
-  const smoothedBalance = applySmoothing(data.leftRightBalance, currentSmoothing);
-  
-  const smoothedLTe = applySmoothing(data.leftTorqueEffectiveness, currentSmoothing);
-  const smoothedRTe = applySmoothing(data.rightTorqueEffectiveness, currentSmoothing);
-  const smoothedLPs = applySmoothing(data.leftPedalSmoothness, currentSmoothing);
-  const smoothedRPs = applySmoothing(data.rightPedalSmoothness, currentSmoothing);
+  const smoothLabel = currentSmoothing === 0 ? 'Raw' : currentSmoothing + 's avg';
   
   const chartGroups = [
-    {
-      id: 'speed-elevation',
-      title: 'Speed & Elevation',
-      visible: true,
-      datasets: []
-    },
-    {
-      id: 'cadence',
-      title: 'Cadence',
-      visible: true,
-      datasets: []
-    },
-    {
-      id: 'heartrate',
-      title: 'Heart Rate',
-      visible: true,
-      datasets: []
-    },
-    {
-      id: 'power',
-      title: 'Power',
-      visible: true,
-      datasets: []
-    },
-    {
-      id: 'balance',
-      title: 'Balance',
-      visible: true,
-      datasets: []
-    },
-    {
-      id: 'torque-smoothness',
-      title: 'Torque Effectiveness & Pedal Smoothness',
-      visible: true,
-      datasets: []
-    },
-    {
-      id: 'balance-vs-power',
-      title: 'Balance vs Power',
-      visible: true,
-      isScatter: true,
-      datasets: []
-    },
-    {
-      id: 'smoothness-vs-power',
-      title: 'Pedal Smoothness vs Power',
-      visible: true,
-      isScatter: true,
-      datasets: []
-    }
+    { id: 'speed', datasets: [] },
+    { id: 'cadence', datasets: [] },
+    { id: 'hr', datasets: [] },
+    { id: 'power', datasets: [] },
+    { id: 'balance', datasets: [] },
+    { id: 'pedal', datasets: [] },
+    { id: 'running', datasets: [] },
+    { id: 'scatter', datasets: [], isScatter: true },
+    { id: 'smoothness', datasets: [], isScatter: true }
   ];
   
   if (data.speed.some(v => v !== null && v !== undefined)) {
+    const avgSpeed = data.speed.filter(v => v != null).reduce((a, b) => a + b, 0) / data.speed.filter(v => v != null).length;
     chartGroups[0].datasets.push({ label: 'Speed (km/h)', data: data.speed, color: '#00d9ff' });
-    const avgSpeed = data.speed.filter(v => v !== null && v !== undefined).reduce((a, b) => a + b, 0) / data.speed.filter(v => v !== null && v !== undefined).length;
-    if (avgSpeed) {
-      chartGroups[0].datasets.push({ label: 'Avg Speed', data: data.speed.map(() => avgSpeed), color: '#66e5ff' });
-    }
+    if (avgSpeed) chartGroups[0].datasets.push({ label: 'Avg Speed', data: data.speed.map(() => avgSpeed), color: '#66e5ff' });
   }
   if (data.altitude.some(v => v !== null && v !== undefined)) {
     chartGroups[0].datasets.push({ label: 'Elevation (m)', data: data.altitude, color: '#f97316', yAxis: 'y2' });
   }
   
   if (data.cadence.some(v => v !== null && v !== undefined)) {
+    const avgCadence = data.cadence.filter(v => v != null).reduce((a, b) => a + b, 0) / data.cadence.filter(v => v != null).length;
     chartGroups[1].datasets.push({ label: 'Cadence (rpm)', data: data.cadence, color: '#00ff88' });
-    const avgCadence = data.cadence.filter(v => v !== null && v !== undefined).reduce((a, b) => a + b, 0) / data.cadence.filter(v => v !== null && v !== undefined).length;
-    if (avgCadence) {
-      chartGroups[1].datasets.push({ label: 'Avg Cadence', data: data.cadence.map(() => avgCadence), color: '#88ffbb' });
-    }
+    if (avgCadence) chartGroups[1].datasets.push({ label: 'Avg Cadence', data: data.cadence.map(() => avgCadence), color: '#88ffbb' });
+  }
+  
+  if (data.strideLength?.some(v => v !== null && v !== undefined)) {
+    const avgStride = data.strideLength.filter(v => v != null).reduce((a, b) => a + b, 0) / data.strideLength.filter(v => v != null).length;
+    chartGroups[1].datasets.push({ label: 'Stride Length (m)', data: data.strideLength, color: '#22c55e', yAxis: 'y2' });
+    if (avgStride) chartGroups[1].datasets.push({ label: 'Avg Stride', data: data.strideLength.map(() => avgStride), color: '#66d98e', yAxis: 'y2' });
   }
   
   if (data.heartRate.some(v => v !== null && v !== undefined)) {
+    const avgHR = data.heartRate.filter(v => v != null).reduce((a, b) => a + b, 0) / data.heartRate.filter(v => v != null).length;
     chartGroups[2].datasets.push({ label: 'Heart Rate (bpm)', data: data.heartRate, color: '#ff6b6b' });
-    const avgHR = data.heartRate.filter(v => v !== null && v !== undefined).reduce((a, b) => a + b, 0) / data.heartRate.filter(v => v !== null && v !== undefined).length;
-    if (avgHR) {
-      chartGroups[2].datasets.push({ label: 'Avg HR', data: data.heartRate.map(() => avgHR), color: '#ff9999' });
-    }
+    if (avgHR) chartGroups[2].datasets.push({ label: 'Avg HR', data: data.heartRate.map(() => avgHR), color: '#ff9999' });
   }
   
-  const smoothLabel = currentSmoothing === 0 ? 'Raw' : currentSmoothing + 's avg';
-  const powerLabel = `Power (W) - ${smoothLabel}`;
+  const smoothedPower = applySmoothing(data.power, currentSmoothing);
   if (data.power.some(v => v !== null && v !== undefined)) {
+    const avgPower = data.power.filter(v => v != null).reduce((a, b) => a + b, 0) / data.power.filter(v => v != null).length;
+    const powerLabel = `Power (W) - ${smoothLabel}`;
     chartGroups[3].datasets.push({ label: powerLabel, data: smoothedPower, color: '#ffd93d' });
-    const avgPower = data.power.filter(v => v !== null && v !== undefined).reduce((a, b) => a + b, 0) / data.power.filter(v => v !== null && v !== undefined).length;
-    if (avgPower) {
-      chartGroups[3].datasets.push({ label: 'Avg Power', data: data.power.map(() => avgPower), color: '#ffe066' });
-    }
+    if (avgPower) chartGroups[3].datasets.push({ label: 'Avg Power', data: data.power.map(() => avgPower), color: '#ffe066' });
   }
+  
+  const smoothedLeftPower = applySmoothing(data.leftPower, currentSmoothing);
+  const smoothedRightPower = applySmoothing(data.rightPower, currentSmoothing);
   if (data.leftPower.some(v => v !== null && v !== undefined)) {
+    const avgLP = data.leftPower.filter(v => v != null).reduce((a, b) => a + b, 0) / data.leftPower.filter(v => v != null).length;
     chartGroups[3].datasets.push({ label: `L Power - ${smoothLabel}`, data: smoothedLeftPower, color: '#06b6d4' });
-    const avgLP = data.leftPower.filter(v => v !== null && v !== undefined).reduce((a, b) => a + b, 0) / data.leftPower.filter(v => v !== null && v !== undefined).length;
-    if (avgLP) {
-      chartGroups[3].datasets.push({ label: 'Avg L Power', data: data.leftPower.map(() => avgLP), color: '#33b5d4' });
-    }
+    if (avgLP) chartGroups[3].datasets.push({ label: 'Avg L Power', data: data.leftPower.map(() => avgLP), color: '#33b5d4' });
   }
   if (data.rightPower.some(v => v !== null && v !== undefined)) {
+    const avgRP = data.rightPower.filter(v => v != null).reduce((a, b) => a + b, 0) / data.rightPower.filter(v => v != null).length;
     chartGroups[3].datasets.push({ label: `R Power - ${smoothLabel}`, data: smoothedRightPower, color: '#f43f5e' });
-    const avgRP = data.rightPower.filter(v => v !== null && v !== undefined).reduce((a, b) => a + b, 0) / data.rightPower.filter(v => v !== null && v !== undefined).length;
-    if (avgRP) {
-      chartGroups[3].datasets.push({ label: 'Avg R Power', data: data.rightPower.map(() => avgRP), color: '#f4718f' });
-    }
+    if (avgRP) chartGroups[3].datasets.push({ label: 'Avg R Power', data: data.rightPower.map(() => avgRP), color: '#f4718f' });
   }
   
+  const smoothedBalance = applySmoothing(data.leftRightBalance, currentSmoothing);
   if (data.leftRightBalance.some(v => v !== null && v !== undefined)) {
     chartGroups[4].datasets.push({ label: `L Balance (%) - ${smoothLabel}`, data: smoothedBalance, color: '#a855f7' });
   }
   
-  const hasTorqueData = data.leftTorqueEffectiveness.some(v => v !== null && v !== undefined && v !== 0) ||
-                        data.rightTorqueEffectiveness.some(v => v !== null && v !== undefined && v !== 0) ||
-                        data.leftPedalSmoothness.some(v => v !== null && v !== undefined && v !== 0) ||
-                        data.rightPedalSmoothness.some(v => v !== null && v !== undefined && v !== 0);
+  const smoothedLTe = applySmoothing(data.leftTorqueEffectiveness, currentSmoothing);
+  const smoothedRTe = applySmoothing(data.rightTorqueEffectiveness, currentSmoothing);
+  const smoothedLPs = applySmoothing(data.leftPedalSmoothness, currentSmoothing);
+  const smoothedRPs = applySmoothing(data.rightPedalSmoothness, currentSmoothing);
+  
+  const hasTorqueData = data.leftTorqueEffectiveness.some(v => v != null && v !== 0) ||
+                        data.rightTorqueEffectiveness.some(v => v != null && v !== 0) ||
+                        data.leftPedalSmoothness.some(v => v != null && v !== 0) ||
+                        data.rightPedalSmoothness.some(v => v != null && v !== 0);
   
   if (hasTorqueData) {
-    if (data.leftTorqueEffectiveness.some(v => v !== null && v !== undefined && v !== 0)) {
+    if (data.leftTorqueEffectiveness.some(v => v != null && v !== 0)) {
       chartGroups[5].datasets.push({ label: `L Torque Eff (%) - ${smoothLabel}`, data: smoothedLTe, color: '#06b6d4' });
     }
-    if (data.rightTorqueEffectiveness.some(v => v !== null && v !== undefined && v !== 0)) {
+    if (data.rightTorqueEffectiveness.some(v => v != null && v !== 0)) {
       chartGroups[5].datasets.push({ label: `R Torque Eff (%) - ${smoothLabel}`, data: smoothedRTe, color: '#f43f5e' });
     }
-    if (data.leftPedalSmoothness.some(v => v !== null && v !== undefined && v !== 0)) {
+    if (data.leftPedalSmoothness.some(v => v != null && v !== 0)) {
+      const avgLPs = data.leftPedalSmoothness.filter(v => v != null && v !== 0).reduce((a, b) => a + b, 0) / data.leftPedalSmoothness.filter(v => v != null && v !== 0).length;
       chartGroups[5].datasets.push({ label: `L Pedal Smooth (%) - ${smoothLabel}`, data: smoothedLPs, color: '#22c55e' });
-      const avgLPs = data.leftPedalSmoothness.filter(v => v !== null && v !== undefined && v !== 0).reduce((a, b) => a + b, 0) / data.leftPedalSmoothness.filter(v => v !== null && v !== undefined && v !== 0).length;
-      if (avgLPs) {
-        chartGroups[5].datasets.push({ label: 'Avg L Smooth', data: data.leftPedalSmoothness.map(() => avgLPs), color: '#66d98e' });
-      }
+      if (avgLPs) chartGroups[5].datasets.push({ label: 'Avg L Smooth', data: data.leftPedalSmoothness.map(() => avgLPs), color: '#66d98e' });
     }
-    if (data.rightPedalSmoothness.some(v => v !== null && v !== undefined && v !== 0)) {
+    if (data.rightPedalSmoothness.some(v => v != null && v !== 0)) {
+      const avgRPs = data.rightPedalSmoothness.filter(v => v != null && v !== 0).reduce((a, b) => a + b, 0) / data.rightPedalSmoothness.filter(v => v != null && v !== 0).length;
       chartGroups[5].datasets.push({ label: `R Pedal Smooth (%) - ${smoothLabel}`, data: smoothedRPs, color: '#eab308' });
-      const avgRPs = data.rightPedalSmoothness.filter(v => v !== null && v !== undefined && v !== 0).reduce((a, b) => a + b, 0) / data.rightPedalSmoothness.filter(v => v !== null && v !== undefined && v !== 0).length;
-      if (avgRPs) {
-        chartGroups[5].datasets.push({ label: 'Avg R Smooth', data: data.rightPedalSmoothness.map(() => avgRPs), color: '#f5d742' });
-      }
+      if (avgRPs) chartGroups[5].datasets.push({ label: 'Avg R Smooth', data: data.rightPedalSmoothness.map(() => avgRPs), color: '#f5d742' });
     }
   }
   
@@ -697,149 +968,96 @@ function renderCharts(data) {
   const lSmoothnessData = [];
   const rSmoothnessData = [];
   for (let i = 0; i < data.power.length; i++) {
-    if (data.power[i] !== null) {
-      if (data.leftPedalSmoothness[i] !== null && data.leftPedalSmoothness[i] !== undefined) {
-        lSmoothnessData.push({ x: data.power[i], y: data.leftPedalSmoothness[i] });
-      }
-      if (data.rightPedalSmoothness[i] !== null && data.rightPedalSmoothness[i] !== undefined) {
-        rSmoothnessData.push({ x: data.power[i], y: data.rightPedalSmoothness[i] });
-      }
+    if (data.leftPedalSmoothness[i] !== null && data.power[i] !== null) {
+      lSmoothnessData.push({ x: data.power[i], y: data.leftPedalSmoothness[i] });
+    }
+    if (data.rightPedalSmoothness[i] !== null && data.power[i] !== null) {
+      rSmoothnessData.push({ x: data.power[i], y: data.rightPedalSmoothness[i] });
     }
   }
-  if (lSmoothnessData.length > 0 || rSmoothnessData.length > 0) {
-    if (lSmoothnessData.length > 0) {
-      chartGroups[7].datasets.push({ label: 'L Smoothness', data: lSmoothnessData, color: '#22c55e' });
+  if (lSmoothnessData.length > 0) {
+    chartGroups[7].datasets.push({ label: 'L Smoothness', data: lSmoothnessData, color: '#22c55e' });
+  }
+  if (rSmoothnessData.length > 0) {
+    chartGroups[7].datasets.push({ label: 'R Smoothness', data: rSmoothnessData, color: '#eab308' });
+  }
+  
+  if (data.verticalRatio?.some(v => v !== null && v !== undefined) || 
+      data.verticalOscillation?.some(v => v !== null && v !== undefined)) {
+    const smoothedVR = applySmoothing(data.verticalRatio, currentSmoothing);
+    if (data.verticalRatio?.some(v => v !== null && v !== undefined)) {
+      chartGroups[6].datasets.push({ label: `Vertical Ratio (%) - ${smoothLabel}`, data: smoothedVR, color: '#22c55e' });
     }
-    if (rSmoothnessData.length > 0) {
-      chartGroups[7].datasets.push({ label: 'R Smoothness', data: rSmoothnessData, color: '#eab308' });
+    if (data.verticalOscillation?.some(v => v !== null && v !== undefined)) {
+      const smoothedVO = applySmoothing(data.verticalOscillation, currentSmoothing).map(v => v !== null ? v / 10 : null);
+      chartGroups[6].datasets.push({ label: `Vertical Oscillation (cm) - ${smoothLabel}`, data: smoothedVO, color: '#06b6d4', yAxis: 'y2' });
     }
   }
   
   const visibleGroups = chartGroups.filter(g => g.datasets.length > 0);
   
-  container.innerHTML = '';
-  
-  Object.values(charts).forEach(chart => chart.destroy());
-  Object.keys(charts).forEach(k => delete charts[k]);
-
-  if (visibleGroups.length === 0) {
-    container.innerHTML += '<div class="no-data">No data to display</div>';
-    return;
-  }
-
   let chartIndex = 0;
-  let currentChartKey = '';
-  
   visibleGroups.forEach((group, gi) => {
     const wrapper = document.createElement('div');
     wrapper.className = 'chart-wrapper';
-    
-    const toggleId = `toggle-${gi}`;
-    const isSmoothable = ['power', 'balance', 'torque-smoothness'].includes(group.id);
-    currentChartKey = group.isScatter ? `scatter-${chartIndex}` : `chart-${chartIndex}`;
-    
-    let headerHtml = `<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
-      <h3 style="margin: 0; color: var(--accent-color, #00ff88); cursor: pointer;" onclick="document.getElementById('${toggleId}').click()">${group.title}</h3>
-      <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-        <input type="checkbox" id="${toggleId}" ${group.visible ? 'checked' : ''} onchange="toggleChartGroup(${gi}, this.checked)">
-        <span style="color: var(--text-secondary, #888); font-size: 0.85rem;">Show</span>
-      </label>
-    </div>`;
-    
-    let extraControls = '';
-    if (isSmoothable) {
-      extraControls = `
-        <div class="smoothing-control" style="margin-bottom: 1rem;">
-          <label>Smoothing:</label>
-          <select class="chart-smoothing" data-group="${group.id}">
-            <option value="0" ${currentSmoothing === 0 ? 'selected' : ''}>Raw</option>
-            <option value="3" ${currentSmoothing === 3 ? 'selected' : ''}>3s</option>
-            <option value="10" ${currentSmoothing === 10 ? 'selected' : ''}>10s</option>
-            <option value="30" ${currentSmoothing === 30 ? 'selected' : ''}>30s</option>
-          </select>
+    const toggleId = `toggle-${tabId}-${gi}`;
+    const headerHtml = `
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem;">
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <input type="checkbox" id="${toggleId}" checked onchange="toggleChartGroup('${tabId}', ${gi}, this.checked)">
+          <label for="${toggleId}" style="margin: 0; cursor: pointer;">${group.datasets[0]?.label?.split(' - ')[0] || group.datasets[0]?.label?.split(' ')[0] || 'Chart'}</label>
         </div>
-      `;
-    }
+        <button class="reset-zoom" onclick="resetZoomForTab('${tabId}')">Reset Zoom</button>
+      </div>
+    `;
     
-    wrapper.innerHTML = headerHtml + extraControls + `<div id="chart-group-${gi}" ${!group.visible ? 'style="display:none"' : ''}><canvas id="chart-${chartIndex}"></canvas></div>`;
+    wrapper.innerHTML = headerHtml + `<div id="chart-group-${tabId}-${gi}"><canvas id="chart-${tabId}-${chartIndex}"></canvas></div>`;
     container.appendChild(wrapper);
     
     const chartOptions = {};
-    if (group.id === 'balance') {
+    if (group.isScatter) {
       chartOptions.yMin = -100;
       chartOptions.yMax = 100;
-    }
-    if (group.isScatter) {
       chartOptions.isScatter = true;
-      if (group.id === 'balance-vs-power') {
+    } else {
+      const mainDs = group.datasets.find(ds => !ds.label.includes('Avg'));
+      if (mainDs?.label?.includes('Balance')) {
         chartOptions.yMin = -100;
         chartOptions.yMax = 100;
-      } else if (group.id === 'smoothness-vs-power') {
+      } else if (mainDs?.label?.includes('Torque') || mainDs?.label?.includes('Smooth')) {
         chartOptions.yMin = 0;
         chartOptions.yMax = 100;
       }
     }
     
-    const ctx = document.getElementById(`chart-${chartIndex}`).getContext('2d');
-    charts[currentChartKey] = new Chart(ctx, createChartConfig(group.datasets, chartOptions));
+    const ctx = document.getElementById(`chart-${tabId}-${chartIndex}`).getContext('2d');
+    charts[`${tabId}-chart-${chartIndex}`] = new Chart(ctx, createChartConfig(group.datasets, chartOptions));
     chartIndex++;
   });
   
-  document.querySelectorAll('.chart-reset-zoom').forEach(btn => {
-    btn.onclick = (e) => {
-      const key = e.currentTarget.dataset.key;
-      if (charts[key]) {
-        charts[key].resetZoom();
-        if (charts[key].scales.x) {
-          charts[key].scales.x.options.min = undefined;
-          charts[key].scales.x.options.max = undefined;
+  window.resetZoomForTab = (tabId) => {
+    Object.entries(charts).forEach(([key, chart]) => {
+      if (key.startsWith(tabId)) {
+        chart.resetZoom();
+        if (chart.scales.x) {
+          chart.scales.x.options.min = undefined;
+          chart.scales.x.options.max = undefined;
         }
-        if (charts[key].scales.y) {
-          charts[key].scales.y.options.min = undefined;
-          charts[key].scales.y.options.max = undefined;
+        if (chart.scales.y) {
+          chart.scales.y.options.min = undefined;
+          chart.scales.y.options.max = undefined;
         }
-        charts[key].update();
+        chart.update();
       }
-    };
-  });
-  
-  document.querySelectorAll('.chart-smoothing').forEach(select => {
-    select.addEventListener('change', (e) => {
-      const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-      currentSmoothing = parseInt(e.target.value);
-      renderCharts(data);
-      window.scrollTo(0, scrollTop);
     });
-  });
+  };
   
-  window.toggleChartGroup = (gi, visible) => {
-    const groupEl = document.getElementById(`chart-group-${gi}`);
+  window.toggleChartGroup = (tabId, gi, visible) => {
+    const groupEl = document.getElementById(`chart-group-${tabId}-${gi}`);
     if (groupEl) {
       groupEl.style.display = visible ? 'block' : 'none';
     }
   };
-}
-
-async function processFiles(files) {
-  clearError();
-  
-  if (files.length === 0) return;
-  
-  try {
-    const fitDataParsed = await parseFitFile(files[0]);
-    fitData = extractRecordData(fitDataParsed);
-    const sessionData = extractSessionData(fitDataParsed, fitData);
-    
-    const stats = calculateStats(fitData, sessionData);
-    
-    renderStats(stats);
-    renderCharts(fitData);
-    renderMap(fitData);
-    
-  } catch (err) {
-    showError(`Error parsing FIT file: ${err.message}`);
-    console.error(err);
-  }
 }
 
 function extractSessionData(data, fitData) {
@@ -894,23 +1112,54 @@ function setupFileHandling() {
     uploadArea.classList.remove('dragover');
   });
   
-  uploadArea.addEventListener('drop', (e) => {
+  uploadArea.addEventListener('drop', async (e) => {
     e.preventDefault();
     uploadArea.classList.remove('dragover');
-    const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.fit'));
+    const files = await handleInputFiles(Array.from(e.dataTransfer.files));
     if (files.length > 0) {
       processFiles(files);
       updateFileList(files);
     }
   });
   
-  fileInput.addEventListener('change', (e) => {
-    const files = Array.from(e.target.files);
+  fileInput.addEventListener('change', async (e) => {
+    const files = await handleInputFiles(Array.from(e.target.files));
     if (files.length > 0) {
       processFiles(files);
       updateFileList(files);
     }
   });
+}
+
+async function handleInputFiles(files) {
+  const fitFiles = [];
+  let zipErrors = [];
+  for (const file of files) {
+    if (file.name.endsWith('.fit') || file.name.endsWith('.FIT')) {
+      fitFiles.push(file);
+    } else if (file.name.endsWith('.zip') || file.name.endsWith('.ZIP')) {
+      try {
+        const zip = await JSZip.loadAsync(file);
+        const fitEntries = Object.keys(zip.files).filter(name => 
+          name.endsWith('.fit') || name.endsWith('.FIT')
+        );
+        if (fitEntries.length > 0) {
+          const fitName = fitEntries.sort()[0];
+          const fitBlob = await zip.files[fitName].async('blob');
+          fitFiles.push(new File([fitBlob], fitName.split('/').pop(), { type: 'application/octet-stream' }));
+        } else {
+          zipErrors.push(file.name);
+        }
+      } catch (err) {
+        console.error('Error extracting zip:', err);
+        showError(`Error reading zip file: ${file.name}`);
+      }
+    }
+  }
+  if (zipErrors.length > 0) {
+    showError(`No .FIT files found in: ${zipErrors.join(', ')}`);
+  }
+  return fitFiles;
 }
 
 function updateFileList(files) {

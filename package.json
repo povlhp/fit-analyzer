@@ -7,13 +7,14 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy": "npm run build && gh-pages -d dist"
+    "deploy": "npm run build && gh-pages -d dist -b gh-pages"
   },
   "dependencies": {
     "@garmin/fitsdk": "^21.195.0",
     "chart.js": "^4.4.1",
     "chartjs-plugin-zoom": "^2.2.0",
     "fit-file-parser": "^2.3.3",
+    "jszip": "^3.10.1",
     "leaflet": "^1.9.4"
   },
   "devDependencies": {

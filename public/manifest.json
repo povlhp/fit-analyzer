@@ -1,0 +1,9 @@
+{
+  "name": "FIT File Analyzer",
+  "short_name": "FIT Analyzer",
+  "description": "Analyze .fit files from Garmin and other devices",
+  "start_url": "/fit-analyzer/",
+  "display": "standalone",
+  "background_color": "#1a1a1a",
+  "theme_color": "#1a1a1a"
+}
